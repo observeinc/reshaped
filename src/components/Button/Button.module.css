@@ -46,7 +46,7 @@
 		transition: var(--rs-duration-fast) var(--rs-easing-standard);
 		transition-property: opacity, background-color;
 		opacity: var(--rs-button-highlight-opacity-base);
-		border-radius: var(--rs-button-radius);
+		border-radius: inherit;
 
 		/* Use highlight based on the text color with an ability to override it */
 		background: var(--rs-button-highlight-color, var(--rs-button-foreground-color));
@@ -260,7 +260,7 @@
 			inset: 0;
 			pointer-events: none;
 			border: 1px solid currentcolor;
-			border-radius: var(--rs-button-radius);
+			border-radius: inherit;
 			opacity: 0.28;
 		}
 	}
