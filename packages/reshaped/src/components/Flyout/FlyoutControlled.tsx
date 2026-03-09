@@ -105,6 +105,8 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 	// Touch devices trigger onMouseEnter but we don't need to apply regular hover timeouts
 	// So we're saving a flag on touch start and then change the mouse enter behavior
 	const hoverTriggeredWithTouchEventRef = React.useRef(false);
+	// Track open intent for race condition between handleOpen and React render commit
+	const openIntentRef = React.useRef(false);
 	// Cleanup function for safe area tracking
 	const safeAreaRef = React.useRef<{ origin: Coordinates; cleanup: () => void } | null>(null);
 
@@ -146,16 +148,15 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 	const disableTriggers = React.useCallback(() => {
 		if (triggerType !== "hover") return;
 
-		document.querySelectorAll("[data-rs-flyout-active]").forEach((el) => {
-			if (el === triggerElRef.current) return;
+		document.querySelectorAll('[data-rs-flyout-active="false"]').forEach((el) => {
 			(el as HTMLElement).style.pointerEvents = "none";
 		});
-	}, [triggerElRef, triggerType]);
+	}, [triggerType]);
 
 	const enableTriggers = React.useCallback(() => {
 		if (triggerType !== "hover") return;
 
-		document.querySelectorAll("[data-rs-flyout-active]").forEach((el) => {
+		document.querySelectorAll('[data-rs-flyout-active="false"]').forEach((el) => {
 			(el as HTMLElement).style.removeProperty("pointer-events");
 		});
 	}, [triggerType]);
@@ -168,6 +169,7 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 		if (lockedRef.current) return;
 		if (isRendered && triggerType !== "hover") return;
 
+		openIntentRef.current = true;
 		onOpenRef.current?.();
 		disableTriggers();
 	}, [onOpenRef, isRendered, triggerType, disableTriggers]);
@@ -175,10 +177,11 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 	const handleClose = React.useCallback<T.ContextProps["handleClose"]>(
 		(options) => {
 			const isLocked = triggerType === "click" && !isDismissible();
-			const canClose = !isLocked && (isRendered || disabled);
+			const canClose = !isLocked && (isRendered || disabled || openIntentRef.current);
 
 			if (!canClose) return;
 
+			openIntentRef.current = false;
 			onCloseRef.current?.({ reason: options.reason });
 			enableTriggers();
 
@@ -271,16 +274,18 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 			)
 				return;
 
-			cooldown.cool();
+			if (groupTimeouts) cooldown.cool();
 			clearTimer();
 
+			// Read origin before cleanup to avoid fragile dependency on cleanup not nulling the ref
+			const prevOrigin = safeAreaRef.current?.origin;
 			safeAreaRef.current?.cleanup();
 
 			if (triggerType === "hover" && isRendered) {
 				// Safe area coordinates are defined based on the trigger mouse out, even when returning mouse from content to trigger
 				const origin =
-					e.currentTarget === flyoutElRef.current && safeAreaRef.current?.origin
-						? safeAreaRef.current.origin
+					e.currentTarget === flyoutElRef.current && prevOrigin
+						? prevOrigin
 						: { x: e.clientX, y: e.clientY };
 				const cleanup = createSafeArea({
 					contentRef: flyoutElRef,
@@ -291,11 +296,26 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 				});
 
 				safeAreaRef.current = { origin, cleanup };
+			} else if (triggerType === "hover" && openIntentRef.current) {
+				// Flyout open is pending but content hasn't rendered yet
+				// Use a delayed close so content has time to appear and handleContentMouseEnter can cancel it
+				timerRef.current = setTimeout(() => {
+					handleClose({});
+				}, timeouts.mouseLeave);
 			} else {
 				handleClose({});
 			}
 		},
-		[clearTimer, handleClose, triggerElRef, flyoutElRef, triggerType, isRendered, flyout.position]
+		[
+			clearTimer,
+			handleClose,
+			triggerElRef,
+			flyoutElRef,
+			triggerType,
+			isRendered,
+			flyout.position,
+			groupTimeouts,
+		]
 	);
 
 	const handleTriggerClick = React.useCallback(() => {
@@ -331,7 +351,7 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 			return;
 		}
 
-		if (disabled) cooldown.cool();
+		if (disabled && groupTimeouts) cooldown.cool();
 
 		// Prevent calling hide on component mount
 		if (prevActive === active) return;
@@ -408,6 +428,13 @@ const FlyoutControlled: React.FC<T.ControlledProps & T.DefaultProps> = (props) =
 		if (!isRendered) return;
 		return () => safeAreaRef.current?.cleanup();
 	}, [isRendered]);
+
+	/**
+	 * Re-enable other flyout triggers on unmount
+	 */
+	React.useEffect(() => {
+		return () => enableTriggers();
+	}, [enableTriggers]);
 
 	/**
 	 * Release focus trapping on unmount
